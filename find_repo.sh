@@ -26,7 +26,8 @@ do
 	if [ -s $pathname ] ; then
 	    sed -i "s/^%files.*$/&\n\%manifest $name\.manifest/" $pathname
 	    cp $MANIFEST ./"$name.manifest"
-	    # TODO ADD GIT COMMANDS
+	    git add "$name.manifest" "$pathname"
+	    git commit -s -m "Add default Smack manifest for $name.spec"
 	    echo $projectpath >> $SUCCESS
 	else
 	    echo $projectpath >> $EMPTY_SPEC
