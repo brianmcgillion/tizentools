@@ -1,0 +1,123 @@
+#!/usr/bin/python
+
+import urllib2, os
+from BeautifulSoup import BeautifulSoup
+from optparse import OptionParser, OptionGroup
+import xml.etree.ElementTree as xml
+from subprocess import *
+
+# The typical git web view is a table with each row representing a repo
+# the column headers that are being parsed are.
+# Project    Description    Owner   Last Change  [links...]
+# We are only concerned with the project column which specifies the project
+# name
+def getGitWebNames(projectBaseUrl):
+    filenames = []
+    #read the raw repo site
+    f = urllib2.urlopen(projectBaseUrl)
+    raw = f.read()
+    # Find the table on the page and extract all the rows from it
+    rows = BeautifulSoup(''.join(raw)).find('table').findAll('tr')
+    for row in rows:
+        cols = row.findAll('td')
+        if (len(cols) <= 0):
+            continue
+        #get the text of the first column without the markup
+        path = cols[0].find(text=True)
+        #drop the .git extension if it exists
+        filename, ext = os.path.splitext(path)
+        filenames.append(filename)
+    return filenames
+
+def getGerritNames(serverUrl):
+    filenames = Popen(["ssh", serverUrl, "gerrit", "ls-projects"], stdout=PIPE).communicate()[0].strip()
+    return filenames.split('\n')
+
+def create_xml(name, fetch_url, filenames, useBasename):
+    manifest = xml.Element('manifest')
+    
+    remote = xml.Element('remote')
+    remote.attrib['name'] = name
+    remote.attrib['fetch'] = fetch_url
+    manifest.append(remote)
+
+    default = xml.Element('default')
+    default.attrib['revision'] = "master"
+    default.attrib['remote'] = name
+    manifest.append(default)
+
+    for path in filenames:
+        project = xml.Element('project')
+        project.attrib['name'] = path
+        if useBasename:
+            project.attrib['path'] = os.path.basename(path)
+        else:
+            project.attrib['path'] = path
+        manifest.append(project)
+    
+    return manifest
+
+def writeManifest(output_path, manifest):
+    file = open(output_path, 'w')
+    xml.ElementTree(manifest).write(file, xml_declaration=True, encoding='utf-8', method="xml")
+
+if __name__ == '__main__':
+
+    desc="""This program aims to generate a 'repo' compatable manifest file.  There are a number of predefined configurations selectable with the -e option or a custom one one can be defined.
+  For the basic use case where the projects are hosted in git web it is possible to simply supply the url of the top of the tree and a name of the project.
+e.g. %prog -u 'https://review.project.org/git' -n 'project'.  If the url where the sources are fetched from is different to the git web then it can be provided as an additional argument e.g.
+%prog -u 'https://review.project.org/git' -n 'project' -f 'ssh://project.org.
+
+If however the project is based on gerrit then it is a requirement to set up the ~/.ssh/config file to define a Host e.g.
+
+Host gerritHost
+   Hostname review.project.org
+   IdentityFile ~/.ssh/id_rsa
+   User <USER NAME>
+   Port 29418
+
+then to create a manifest simply define
+
+%prog -url 'gerritHost' -n 'project' -f 'ssh://gerritHost/' -g
+
+The output of this script should be stored in a repository that is accessable by repo.  Then the commands "repo init -u ... -m new_manifest" and "repo sync" will function like in other repo related projects.
+
+"""
+    parser = OptionParser(description=desc)
+    parser.add_option("-b", "--basename", action="store_true", dest="useBasename", default=False, help='Store cloned repos as the base name of the project and not as a full path e.g. "public/api/project" will be cloned as "project"')
+    parser.add_option('-e', '--env', type='choice', action='store', dest='baseEnv', choices=['tizen', 'tz', 'rsa',], default=None, help='Git/Gerrit environment to clone from')
+    group = OptionGroup(parser, "Define own custom environment to clone from")
+    group.add_option("-n", "--name", action="store", type="string", dest="name", help='Define project name')
+    group.add_option("-u", "--url", action="store", type="string", dest="url", help='Url of the repo, or the "Host" as defined in ~/.ssh/config')
+    group.add_option("-f", "--fetch", action="store", type="string", dest="fetchUrl", help='The Url that will be used to clone the repos from, if different from url')
+    group.add_option("-g", "--gerrit", action="store_true", dest="useGerrit", default=False, help='Define if the url points to a gerrit environment')
+    parser.add_option_group(group)
+    (options, args) = parser.parse_args()
+
+    known_envs = { 'tizen': ['https://review.tizen.org/git', 'tizenorg', False, 'https://review.tizen.org/git'],
+                   'tz': ['tzgerrit', 'tzotcshare', True, 'ssh://tzgerrit/'],
+                   'rsa': ['rsagerrit', 'tizendev', True, 'ssh://rsagerrit/'] }
+
+    use_settings = None
+    filenames = None
+
+    if options.url:
+        if options.name is None:
+            print("\nMust supply a name when defining a url\n")
+            parser.print_help()
+            exit(-1)
+        if options.fetchUrl is None:
+            options.fetchUrl = options.url # assume the same url for both project base and cloning
+        use_settings = [options.url, options.name, options.useGerrit, options.fetchUrl]
+    elif options.baseEnv:
+        use_settings = known_envs[options.baseEnv]
+    else:
+        parser.print_help()
+        exit(-1)
+
+    if use_settings[2]:
+        filenames = getGerritNames(use_settings[0])
+    else:
+        filenames = getGitWebNames(use_settings[0])
+
+    writeManifest("default.xml", create_xml(use_settings[1], use_settings[3], filenames, options.useBasename));
